@@ -3,7 +3,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -104,6 +104,10 @@ GetOptions(
     "scrips!",
     "tickets!",
     "acls!",
+    "limit-queues=s@",
+    "limit-cfs=s@",
+    "hyperlink-unmigrated!",
+    "assets!",
 
     "clone",
     "incremental",
@@ -127,14 +131,57 @@ $args{FollowScrips}  = $OPT{scrips}   if defined $OPT{scrips};
 $args{FollowTickets} = $OPT{tickets}  if defined $OPT{tickets};
 $args{FollowACL}     = $OPT{acls}     if defined $OPT{acls};
 
+$args{HyperlinkUnmigrated} = $OPT{'hyperlink-unmigrated'} if defined $OPT{'hyperlink-unmigrated'};
+
+$args{FollowAssets} = $OPT{assets} if defined $OPT{assets};
+
 $args{Clone}         = $OPT{clone}       if $OPT{clone};
 $args{Incremental}   = $OPT{incremental} if $OPT{incremental};
 
 $args{GC}   = defined $OPT{gc}   ? $OPT{gc}   : 5000;
 $args{Page} = defined $OPT{page} ? $OPT{page} : 100;
 
+if ($OPT{'limit-queues'}) {
+    my @queue_ids;
+
+    for my $name (split ',', join ',', @{ $OPT{'limit-queues'} }) {
+        $name =~ s/^\s+//; $name =~ s/\s+$//;
+        my $queue = RT::Queue->new(RT->SystemUser);
+        $queue->Load($name);
+        if (!$queue->Id) {
+            die "Unable to load queue '$name'";
+        }
+        push @queue_ids, $queue->Id;
+    }
+
+    $args{Queues} = \@queue_ids;
+}
+
+if ($OPT{'limit-cfs'}) {
+    my @cf_ids;
+
+    for my $name (split ',', join ',', @{ $OPT{'limit-cfs'} }) {
+        $name =~ s/^\s+//; $name =~ s/\s+$//;
+
+        # numeric means id
+        if ($name =~ /^\d+$/) {
+            push @cf_ids, $name;
+        }
+        else {
+            my $cfs = RT::CustomFields->new(RT->SystemUser);
+            $cfs->Limit(FIELD => 'Name', VALUE => $name);
+            if (!$cfs->Count) {
+                die "Unable to load any custom field named '$name'";
+            }
+            push @cf_ids, map { $_->Id } @{ $cfs->ItemsArrayRef };
+        }
+    }
+
+    $args{CustomFields} = \@cf_ids;
+}
+
 if (($OPT{clone} or $OPT{incremental})
-        and grep { /^(users|groups|deleted|scrips|tickets|acls)$/ } keys %OPT) {
+        and grep { /^(users|groups|deleted|scrips|tickets|acls|assets)$/ } keys %OPT) {
     die "You cannot specify object types when cloning.\n\nPlease see $0 --help.\n";
 }
 
@@ -192,6 +239,7 @@ sub estimate {
         User  Group  GroupMember Attribute
         CustomField CustomFieldValue
         ObjectCustomField ObjectCustomFieldValue
+        Catalog Asset
                                  /;
 
     for my $class (@types) {
@@ -201,7 +249,8 @@ sub estimate {
             my $objs = $collection->new( RT->SystemUser );
             $objs->FindAllRows;
             $objs->UnLimit;
-            $objs->{allow_deleted_search} = 1 if $class eq "RT::Ticket";
+            $objs->{allow_deleted_search} = 1
+                if $class eq "RT::Ticket" || $class eq "RT::Asset";
             $e{$class} = $objs->DBIx::SearchBuilder::Count;
         }
         print "\r", " "x60, "\r";
@@ -302,10 +351,16 @@ By default, all groups are serialized; passing C<--no-groups> limits it
 to only system-internal groups, which are needed for internal
 consistency.
 
+=item B<--no-assets>
+
+By default, all assets are serialized; passing C<--no-assets> skips
+assets during serialization.
+
 =item B<--no-deleted>
 
-By default, all tickets, including deleted tickets, are serialized;
-passing C<--no-deleted> skips deleted tickets during serialization.
+By default, all tickets and assets, including deleted ones, are
+serialized; passing C<--no-deleted> skips deleted tickets and assets
+during serialization.
 
 =item B<--scrips>
 
@@ -320,6 +375,24 @@ serialized.
 =item B<--no-tickets>
 
 Skip serialization of all ticket data.
+
+=item B<--limit-queues>
+
+Takes a list of queue IDs or names separated by commas. When provided, only
+that set of queues (and the tickets in them) will be serialized.
+
+=item B<--limit-cfs>
+
+Takes a list of custom field IDs or names separated by commas. When provided,
+only that set of custom fields will be serialized.
+
+=item B<--hyperlink-unmigrated>
+
+Replace links to local records which are not being migrated with hyperlinks.
+The hyperlinks will use the serializing RT's configured URL.
+
+Without this option, such links are instead dropped, and transactions which
+had updated such links will be replaced with an explanatory message.
 
 =item B<--clone>
 

@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -50,6 +50,8 @@ package RT::Authen::ExternalAuth::DBI;
 
 use DBI;
 use RT::Authen::ExternalAuth::DBI::Cookie;
+use RT::Util;
+use List::MoreUtils 'uniq';
 
 use warnings;
 use strict;
@@ -81,6 +83,7 @@ Provides the database implementation for L<RT::Authen::ExternalAuth>.
             'p_field'                   =>  'password',
 
             # Example of custom hashed password check
+            # (See below for security concerns with this implementation)
             #'p_check'                   =>  sub {
             #    my ($hash_from_db, $password) = @_;
             #    return $hash_from_db eq function($password);
@@ -169,6 +172,17 @@ An example, where C<FooBar()> is some external hashing function:
 
 Importantly, the C<p_check> subroutine allows for arbitrarily complex password
 checking unlike C<p_enc_pkg> and C<p_enc_sub>.
+
+Please note, the use of the C<eq> operator in the C<p_check> example above
+introduces a timing sidechannel vulnerability. (It was left there for clarity
+of the example.) There is a comparison function available in RT that is
+hardened against timing attacks. The comparison from the above example could
+be re-written with it like this:
+
+    p_check => sub {
+        my ($hash_from_db, $password) = @_;
+        return RT::Util::constant_time_eq($hash_from_db, FooBar($password));
+    },
 
 =item p_enc_pkg, p_enc_sub
 
@@ -298,7 +312,7 @@ sub GetAuth {
         # Jump to the next external authentication service if they don't match
         if(defined($db_p_salt)) {
             $RT::Logger->debug("Using salt:",$db_p_salt);
-            if(${encrypt}->($password,$db_p_salt) ne $pass_from_db){
+            unless (RT::Util::constant_time_eq(${encrypt}->($password,$db_p_salt), $pass_from_db)) {
                 $RT::Logger->info(  $service,
                                     "AUTH FAILED",
                                     $username,
@@ -306,7 +320,7 @@ sub GetAuth {
                 return 0;
             }
         } else {
-            if(${encrypt}->($password) ne $pass_from_db){
+            unless (RT::Util::constant_time_eq(${encrypt}->($password), $pass_from_db)) {
                 $RT::Logger->info(  $service,
                                     "AUTH FAILED",
                                     $username,
@@ -372,9 +386,19 @@ sub CanonicalizeUserInfo {
     my ($where_key,$where_value) = ("@{[ $key ]}",$value);
 
     # Get the list of unique attrs we need
-    my %db_attrs = map {$_ => 1} values(%{$config->{'attr_map'}});
-    my @attrs = keys(%db_attrs);
-    my $fields = join(',',@attrs);
+    my @attrs;
+    for my $field ( values %{ $config->{'attr_map'} } ) {
+        if ( ref $field eq 'CODE' ) {
+            push @attrs, $field->();
+        }
+        elsif ( ref $field eq 'ARRAY' ) {
+            push @attrs, @$field;
+        }
+        else {
+            push @attrs, $field;
+        }
+    }
+    my $fields = join(',', uniq grep defined && length, @attrs);
     my $query = "SELECT $fields FROM $table WHERE $where_key=?";
     my @bind_params = ($where_value);
 
@@ -415,7 +439,33 @@ sub CanonicalizeUserInfo {
 
     # Use the result to populate %params for every key we're given in the config
     foreach my $key (keys(%{$config->{'attr_map'}})) {
-        $params{$key} = ($result->{$config->{'attr_map'}->{$key}})[0];
+        my $external_field = $config->{'attr_map'}{$key};
+        my @list = grep defined && length, ref $external_field eq 'ARRAY' ? @$external_field : ($external_field);
+        unless (@list) {
+            $RT::Logger->error("Invalid attr mapping for $key, no defined fields");
+            next;
+        }
+
+        my @values;
+        foreach my $e (@list) {
+            if ( ref $e eq 'CODE' ) {
+                push @values,
+                  $e->(
+                    external_entry => $result,
+                    mapping        => $config->{'attr_map'},
+                    rt_field       => $key,
+                    external_field => $external_field,
+                  );
+            }
+            elsif ( ref $e ) {
+                $RT::Logger->error("Invalid type of attr mapping for $key, value is $e");
+                next;
+            }
+            else {
+                push @values, $result->{$e};
+            }
+        }
+        $params{$key} = join ' ', grep defined && length, @values;
     }
 
     $found = 1;

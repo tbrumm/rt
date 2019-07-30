@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -379,7 +379,7 @@ sub _CustomFieldJoin {
         $self->Limit(
             LEFTJOIN        => $ocfvalias,
             FIELD           => 'CustomField',
-            VALUE           => $cf->id,
+            VALUE           => $cf->Disabled ? 0 : $cf->id,
             ENTRYAGGREGATOR => 'AND'
         );
     }
@@ -435,6 +435,12 @@ sub _CustomFieldJoinByName {
         CASESENSITIVE   => 0,
         VALUE           => $cf,
     );
+    $self->Limit(
+        LEFTJOIN        => $CFs,
+        ENTRYAGGREGATOR => 'AND',
+        FIELD           => 'Disabled',
+        VALUE           => 0,
+    );
 
     my $ocfvalias = $self->Join(
         TYPE   => 'LEFT',
@@ -479,6 +485,13 @@ sub _LimitCustomField {
     my $cfkey  = delete $args{KEY};
     if (blessed($cf) and $cf->id) {
         $cfkey ||= $cf->id;
+
+        # Make sure we can really see $cf
+        unless ( $cf->CurrentUserHasRight('SeeCustomField') ) {
+            my $obj = RT::CustomField->new( RT->SystemUser );
+            $obj->Load( $cf->id );
+            $cf = $obj;
+        }
     } elsif ($cf =~ /^\d+$/) {
         # Intentionally load as the system user, so we can build better
         # queries; this is necessary as we don't have a context object
@@ -493,7 +506,21 @@ sub _LimitCustomField {
             $cfkey ||= "$ltype-$cf";
         }
     } else {
-        $cfkey ||= "$ltype-$cf";
+        # Resolve CF by name for better queries, like the above block.
+        my $cfs = RT::CustomFields->new( RT->SystemUser );
+        $cfs->LimitToLookupType($ltype);
+        $cfs->Limit(
+            FIELD         => 'Name',
+            VALUE         => $cf,
+            CASESENSITIVE => 0,
+        );
+        if ( $cfs->Count == 1 ) {
+            $cf = $cfs->Next;
+            $cfkey ||= $cf->id;
+        }
+        else {
+            $cfkey ||= "$ltype-$cf";
+        }
     }
 
     $args{SUBCLAUSE} ||= "cf-$cfkey";

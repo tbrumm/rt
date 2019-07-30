@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -90,7 +90,7 @@ Returns the site-specific prefix for a local asset URI
 
 sub LocalURIPrefix {
     my $self = shift;
-    return $self->Scheme . "://" . RT->Config->Get('Organization') . "/";
+    return $self->Scheme . "://" . RT->Config->Get('Organization');
 }
 
 =head2 IsLocal
@@ -103,7 +103,7 @@ undef otherwise.
 sub IsLocal {
     my $self   = shift;
     my $prefix = $self->LocalURIPrefix;
-    return $1 if $self->{uri} =~ /^\Q$prefix\E(\d+)/i;
+    return $1 if $self->{uri} =~ qr!^\Q$prefix\E/(\d+)!i;
     return undef;
 }
 
@@ -116,7 +116,7 @@ Returns the URI for a local L<RT::Asset> object
 sub URIForObject {
     my $self = shift;
     my $obj  = shift;
-    return $self->LocalURIPrefix . $obj->Id;
+    return $self->LocalURIPrefix . '/' . $obj->Id;
 }
 
 =head2 ParseURI URI
@@ -138,7 +138,17 @@ sub ParseURI {
 
     # canonicalize "42" and "asset:42" -> asset://example.com/42
     if ($uri =~ /^(?:\Q$scheme\E:)?(\d+)$/i) {
-        $self->{'uri'} = $self->LocalURIPrefix . $1;
+        my $asset_obj = RT::Asset->new( $self->CurrentUser );
+        my ($ret, $msg) = $asset_obj->Load($1);
+
+        if ( $ret ) {
+            $self->{'uri'} = $asset_obj->URI;
+            $self->{'object'} = $asset_obj;
+        }
+        else {
+            RT::Logger->error("Unable to load asset for id: $1: $msg");
+            return;
+        }
     }
     else {
         $self->{'uri'} = $uri;

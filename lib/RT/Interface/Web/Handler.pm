@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -58,6 +58,7 @@ use Time::HiRes;
 use HTML::Scrubber;
 use RT::Interface::Web;
 use RT::Interface::Web::Request;
+use RT::ObjectCustomFieldValues;
 use File::Path qw( rmtree );
 use File::Glob qw( bsd_glob );
 use File::Spec::Unix;
@@ -199,7 +200,7 @@ sub CleanupRequest {
     File::Temp::cleanup()
             unless $INC{'Test/WWW/Mechanize/PSGI.pm'};
 
-
+    RT::ObjectCustomFieldValues::ClearOCFVCache();
 }
 
 

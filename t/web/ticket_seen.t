@@ -2,7 +2,7 @@
 use strict;
 use warnings;
 
-use RT::Test nodata => 1, tests => 23, config => 'Set($ShowUnreadMessageNotifications, 1);';
+use RT::Test nodata => 1, tests => undef, config => 'Set($ShowUnreadMessageNotifications, 1);';
 
 my $queue = RT::Test->load_or_create_queue( Name => 'Regression' );
 ok $queue && $queue->id, 'loaded or created queue';
@@ -69,12 +69,17 @@ diag "user B adds a message, we check that user A see notification and can clear
     );
 
     $agent_a->follow_link_ok(
-        { text => 'jump to the first unread message' },
+        { text => 'Jump to Unread' },
         'try to jump to first unread message'
     );
     like( $agent_a->base, qr/#txn-$reply_id$/, 'contains anchor' );
 
-    $agent_a->follow_link_ok({text => 'jump to the first unread message and mark all messages as seen'}, 'try to mark all as seen');
+    $agent_a->follow_link_ok(
+        { text => 'Jump & Mark as Seen' },
+        'try to jump to first unread message'
+    );
+    like( $agent_a->base, qr/#txn-$reply_id$/, 'contains anchor' );
+
     $agent_a->content_contains(
         'Marked all messages as seen',
         'see success message'
@@ -93,3 +98,4 @@ diag "user B adds a message, we check that user A see notification and can clear
     );
 }
 
+done_testing;

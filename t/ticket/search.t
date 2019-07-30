@@ -58,7 +58,7 @@ ok($dupcf->id, "Created the SearchTest3 CF");
 
 
 my $t1 = RT::Ticket->new(RT->SystemUser);
-my ( $id, undef $msg ) = $t1->Create(
+my ( $id, undef, $msg ) = $t1->Create(
     Queue      => $q->id,
     Subject    => 'SearchTest1',
     Requestor  => ['search1@example.com'],
@@ -288,6 +288,29 @@ is($tix->Count, 1, "(queue LIKE) and (is cf1 or is cf1) and (is cf2 or is cf2)")
 $tix = RT::Tickets->new(RT->SystemUser);
 $tix->FromSQL("CF.SearchTest = 'foo1' OR CF.SearchTest = 'foo3' OR CF.SearchTest2 = 'bar1' OR CF.SearchTest2 = 'bar2'");
 is($tix->Count, 3, "is cf1 or is cf1 or is cf2 or is cf2");
+
+# tests with disabled CF
+$cf->SetDisabled(1);
+ok($cf->Disabled, 'cf1 is disabled');
+
+$tix = RT::Tickets->new(RT->SystemUser);
+$tix->FromSQL("CF.SearchTest = 'foo1'");
+is($tix->Count, 0, "disabled cf1 with name");
+
+$tix = RT::Tickets->new(RT->SystemUser);
+$tix->FromSQL("CF." . $cf->id . " = 'foo1'");
+is($tix->Count, 0, "disabled cf1 with id");
+
+$tix = RT::Tickets->new(RT->SystemUser);
+$tix->FromSQL("CF.SearchTest != 'foo1'");
+is($tix->Count, 7, "disabled cf1 with name and negative operator");
+
+$tix = RT::Tickets->new(RT->SystemUser);
+$tix->FromSQL("CF." . $cf->id . " != 'foo1'");
+is($tix->Count, 7, "disabled cf1 with id and negative operator");
+
+$cf->SetDisabled(0);
+ok(!$cf->Disabled, 'cf1 is enabled');
 
 # tests with lower cased NULL
 $tix = RT::Tickets->new(RT->SystemUser);

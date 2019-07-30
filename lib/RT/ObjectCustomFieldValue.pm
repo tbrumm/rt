@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -48,6 +48,7 @@
 
 package RT::ObjectCustomFieldValue;
 
+use 5.010;
 use strict;
 use warnings;
 use base 'RT::Record';
@@ -107,7 +108,7 @@ sub Create {
         $self->_EncodeLOB( $args{'LargeContent'}, $args{'ContentType'} )
             if defined $args{'LargeContent'};
 
-    return $self->SUPER::Create(
+    ( my $id, $msg ) = $self->SUPER::Create(
         CustomField     => $args{'CustomField'},
         ObjectType      => $args{'ObjectType'},
         ObjectId        => $args{'ObjectId'},
@@ -117,6 +118,23 @@ sub Create {
         ContentType     => $args{'ContentType'},
         ContentEncoding => $args{'ContentEncoding'},
     );
+
+    if ( $id ) {
+        my $new_value = RT::ObjectCustomFieldValue->new( $self->CurrentUser );
+        $new_value->Load( $id );
+        my $ocfv_key = $new_value->GetOCFVCacheKey();
+        if ( $RT::ObjectCustomFieldValues::_OCFV_CACHE->{$ocfv_key} ) {
+            push @{ $RT::ObjectCustomFieldValues::_OCFV_CACHE->{$ocfv_key} },
+              {
+                'ObjectId'       => $new_value->Id,
+                'CustomFieldObj' => $new_value->CustomFieldObj,
+                'Content'        => $new_value->_Value('Content'),
+                'LargeContent'   => $new_value->LargeContent,
+              };
+        }
+    }
+
+    return wantarray ? ( $id, $msg ) : $id;
 }
 
 
@@ -295,7 +313,15 @@ Disable this value. Used to remove "current" values from records while leaving t
 
 sub Delete {
     my $self = shift;
-    return $self->SetDisabled(1);
+    my ( $ret, $msg ) = $self->SetDisabled( 1 );
+    if ( $ret ) {
+        my $ocfv_key = $self->GetOCFVCacheKey();
+        if ( $RT::ObjectCustomFieldValues::_OCFV_CACHE->{$ocfv_key} ) {
+            @{ $RT::ObjectCustomFieldValues::_OCFV_CACHE->{$ocfv_key} } =
+              grep { $_->{'ObjectId'} != $self->Id } @{ $RT::ObjectCustomFieldValues::_OCFV_CACHE->{$ocfv_key} };
+        }
+    }
+    return wantarray ? ( $ret, $msg ) : $ret;
 }
 
 =head2 _FillInTemplateURL URL
@@ -343,6 +369,7 @@ sub _FillInTemplateURL {
     # special case, whole value should be an URL
     if ( $url =~ /^__CustomField__/ ) {
         my $value = $self->Content;
+        $value //= '';
         # protect from potentially malicious URLs
         if ( $value =~ /^\s*(?:javascript|data):/i ) {
             my $object = $self->Object;
@@ -359,7 +386,7 @@ sub _FillInTemplateURL {
     for my $key (keys %placeholders) {
         $url =~ s{__${key}__}{
             my $value = $placeholders{$key}{'value'}->( $self );
-            $value = '' if !defined($value);
+            $value //= '';
             RT::Interface::Web::EscapeURI(\$value) if $placeholders{$key}{'escape'};
             $value
         }gxe;
@@ -487,6 +514,20 @@ sub ParseIP {
     return;
 }
 
+
+=head2 GetOCFVCacheKey
+
+Get the OCFV cache key for this object
+
+=cut
+
+sub GetOCFVCacheKey {
+    my $self = shift;
+    my $ocfv_key = "CustomField-" . $self->CustomField
+        . '-ObjectType-' . $self->ObjectType
+        . '-ObjectId-' . $self->ObjectId;
+    return $ocfv_key;
+}
 
 =head2 id
 

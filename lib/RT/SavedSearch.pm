@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -188,6 +188,38 @@ sub _PrivacyObjects {
 sub ObjectsForLoading {
     my $self = shift;
     return grep { $self->CurrentUserCanSee($_) } $self->_PrivacyObjects( "SavedSearch" );
+}
+
+=head2 ObjectsForCreating
+
+In the context of the current user, load a list of objects that could have searches
+saved under, including the current user and groups. This method considers both rights
+and group membership when creating the list of objects for saved searches.
+
+=cut
+
+sub ObjectsForCreating {
+    my $self = shift;
+    my @objects = $self->_PrivacyObjects( );
+    my @create_objects;
+
+    foreach my $object ( @objects ) {
+        # Users need ModifySelf to save personal searches
+        if ( ref $object
+             && ref $object eq 'RT::User'
+             && $self->CurrentUser->HasRight( Right => 'ModifySelf', Object => $object ) ) {
+            push @create_objects, $object;
+        }
+
+        # On groups, the EditSavedSearches right manages create and edit
+        if ( ref $object
+             && ref $object eq 'RT::Group'
+             && $self->CurrentUser->HasRight( Right => 'EditSavedSearches', Object => $object ) ) {
+            push @create_objects, $object;
+        }
+    }
+
+    return @create_objects;
 }
 
 RT::Base->_ImportOverlays();

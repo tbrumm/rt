@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -471,6 +471,28 @@ sub _Set {
     return ($txn_id, scalar $txn->BriefDescription);
 }
 
+=head2 Lifecycle [CONTEXT_OBJ]
+
+Returns the current value of Lifecycle.
+
+Provide an optional asset object as context to check role-level rights
+in addition to catalog-level rights for ShowCatalog and AdminCatalog.
+
+(In the database, Lifecycle is stored as varchar(32).)
+=cut
+
+sub Lifecycle {
+    my $self    = shift;
+    my $context_obj = shift;
+
+    if ( $context_obj && $context_obj->CatalogObj->Id eq $self->Id &&
+        ( $context_obj->CurrentUserHasRight('ShowCatalog') or $context_obj->CurrentUserHasRight('AdminCatalog') ) ) {
+        return ( $self->__Value('Lifecycle') );
+    }
+
+    return ( $self->_Value('Lifecycle') );
+}
+
 =head2 _Value
 
 Checks L</CurrentUserCanSee> before calling C<SUPER::_Value>.
@@ -497,6 +519,59 @@ sub _CoreAccessible {
         LastUpdatedBy => { read => 1, type => 'int(11)',        default => '0', auto => 1 },
         LastUpdated   => { read => 1, type => 'datetime',       default => '',  auto => 1 },
     }
+}
+
+sub FindDependencies {
+    my $self = shift;
+    my ($walker, $deps) = @_;
+
+    $self->SUPER::FindDependencies($walker, $deps);
+
+    # Role groups( HeldBy, Contact)
+    my $objs = RT::Groups->new( $self->CurrentUser );
+    $objs->Limit( FIELD => 'Domain', VALUE => 'RT::Catalog-Role', CASESENSITIVE => 0 );
+    $objs->Limit( FIELD => 'Instance', VALUE => $self->Id );
+    $deps->Add( in => $objs );
+
+    # Custom Fields on assets _in_ this catalog
+    $objs = RT::ObjectCustomFields->new( $self->CurrentUser );
+    $objs->Limit( FIELD           => 'ObjectId',
+                  OPERATOR        => '=',
+                  VALUE           => $self->id,
+                  ENTRYAGGREGATOR => 'OR' );
+    $objs->Limit( FIELD           => 'ObjectId',
+                  OPERATOR        => '=',
+                  VALUE           => 0,
+                  ENTRYAGGREGATOR => 'OR' );
+    my $cfs = $objs->Join(
+        ALIAS1 => 'main',
+        FIELD1 => 'CustomField',
+        TABLE2 => 'CustomFields',
+        FIELD2 => 'id',
+    );
+    $objs->Limit( ALIAS    => $cfs,
+                  FIELD    => 'LookupType',
+                  OPERATOR => 'STARTSWITH',
+                  VALUE    => 'RT::Catalog-' );
+    $deps->Add( in => $objs );
+
+    # Assets
+    $objs = RT::Assets->new( $self->CurrentUser );
+    $objs->Limit( FIELD => "Catalog", VALUE => $self->Id );
+    $objs->{allow_deleted_search} = 1;
+    $deps->Add( in => $objs );
+
+}
+
+sub PreInflate {
+    my $class = shift;
+    my ( $importer, $uid, $data ) = @_;
+
+    $class->SUPER::PreInflate( $importer, $uid, $data );
+    $data->{Name} = $importer->Qualify( $data->{Name} );
+
+    return if $importer->MergeBy( "Name", $class, $uid, $data );
+    return 1;
 }
 
 RT::Base->_ImportOverlays();

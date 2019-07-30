@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -658,6 +658,7 @@ sub AddWatcher {
     my $group = $self->RoleGroup( $args{Type} );
     if ($group->id && $group->SingleMemberRoleGroup) {
         my $users = $group->UserMembersObj( Recursively => 0 );
+        $users->{find_disabled_rows} = 1;
         $original_user = $users->First;
         if ($original_user->PrincipalId == $principal->Id) {
             return 1;
@@ -724,13 +725,14 @@ sub DeleteWatcher {
 
 
 
-=head2 SquelchMailTo [EMAIL]
+=head2 SquelchMailTo ADDRESSES
 
-Takes an optional email address to never email about updates to this ticket.
+Takes a list of email addresses to never email about updates to this ticket.
+Subsequent calls to this method add, rather than replace, the list of
+squelched addresses.
 
-
-Returns an array of the RT::Attribute objects for this ticket's 'SquelchMailTo' attributes.
-
+Returns an array of the L<RT::Attribute> objects for this ticket's
+'SquelchMailTo' attributes.
 
 =cut
 
@@ -751,7 +753,7 @@ sub SquelchMailTo {
 
 sub _SquelchMailTo {
     my $self = shift;
-    if (@_) {
+    while (@_) {
         my $attr = shift;
         $self->AddAttribute( Name => 'SquelchMailTo', Content => $attr )
             unless grep { $_->Content eq $attr }
@@ -1051,6 +1053,15 @@ sub TransactionAddresses {
     $attachments->LimitByTicket( $self->id );
     $attachments->Columns( qw( id Headers TransactionId));
 
+    # If $TreatAttachedEmailAsFiles is set, don't parse child attachments
+    # for email addresses.
+    if ( RT->Config->Get('TreatAttachedEmailAsFiles') ){
+        $attachments->Limit(
+            FIELD => 'Parent',
+            VALUE => 0,
+        );
+    }
+
     $attachments->Limit(
         ALIAS         => $attachments->TransactionAlias,
         FIELD         => 'Type',
@@ -1169,6 +1180,23 @@ sub QueueObj {
         my ($result) = $self->{_queue_obj}->Load( $self->__Value('Queue') );
     }
     return ($self->{_queue_obj});
+}
+
+sub Subject {
+    my $self = shift;
+
+    my $subject = $self->_Value( 'Subject' );
+    return $subject if defined $subject;
+
+    if ( RT->Config->Get( 'DatabaseType' ) eq 'Oracle' && $self->CurrentUserHasRight( 'ShowTicket' ) ) {
+
+        # Oracle treats empty strings as NULL, so it returns undef for empty subjects.
+        # Since '' is the default Subject value, returning '' is more correct.
+        return '';
+    }
+    else {
+        return undef;
+    }
 }
 
 sub SetSubject {
@@ -1411,8 +1439,89 @@ sub TimeEstimatedAsString {
     return $self->_DurationAsString( $self->TimeEstimated );
 }
 
+=head2 TotalTimeWorked
 
+Returns the amount of time worked on this ticket and all child tickets
 
+=cut
+
+sub TotalTimeWorked {
+    my $self = shift;
+    my $seen = shift || {};
+    my $time = $self->TimeWorked;
+    my $links = $self->Members;
+    LINK: while (my $link = $links->Next) {
+        my $obj = $link->BaseObj;
+        next LINK unless $obj && UNIVERSAL::isa($obj,'RT::Ticket');
+        next LINK if $seen->{$obj->Id};
+        $seen->{ $obj->Id } = 1;
+        $time += $obj->TotalTimeWorked($seen);
+    }
+    return $time;
+}
+
+=head2 TotalTimeWorkedAsString
+
+Returns the amount of time worked on this ticket and all its children as a
+formatted duration string
+
+=cut
+
+sub TotalTimeWorkedAsString {
+    my $self = shift;
+    return $self->_DurationAsString( $self->TotalTimeWorked );
+}
+
+=head2 TimeWorkedPerUser
+
+Returns a hash of user id to the amount of time worked on this ticket for
+that user
+
+=cut
+
+sub TimeWorkedPerUser {
+    my $self = shift;
+    my %time_worked;
+
+    my $transactions = $self->Transactions;
+    $transactions->Limit(
+        FIELD           => 'TimeTaken',
+        VALUE           => 0,
+        OPERATOR        => '!=',
+    );
+
+    while ( my $txn = $transactions->Next ) {
+        $time_worked{ $txn->CreatorObj->Name } += $txn->TimeTaken;
+    }
+
+    return \%time_worked;
+}
+
+=head2 TotalTimeWorkedPerUser
+
+Returns the amount of time worked on this ticket and all child tickets
+calculated per user
+
+=cut
+
+sub TotalTimeWorkedPerUser {
+    my $self = shift;
+    my $seen = shift || {};
+    my $time = $self->TimeWorkedPerUser;
+    my $links = $self->Members;
+    LINK: while (my $link = $links->Next) {
+        my $obj = $link->BaseObj;
+        next LINK unless $obj && UNIVERSAL::isa($obj,'RT::Ticket');
+        next LINK if $seen->{$obj->Id};
+        $seen->{ $obj->Id } = 1;
+
+        my $child_time = $obj->TotalTimeWorkedPerUser($seen);
+        for my $user_id (keys %$child_time) {
+            $time->{$user_id} += $child_time->{$user_id};
+        }
+    }
+    return $time;
+}
 
 =head2 Comment
 
@@ -1789,6 +1898,11 @@ sub MergeInto {
     # Can't merge into yourself
     if ( $MergeInto->Id == $self->Id ) {
         return ( 0, $self->loc("Can't merge a ticket into itself") );
+    }
+
+    # Only tickets can be merged
+    unless ($MergeInto->Type eq 'ticket' && $self->Type eq 'ticket'){
+        return(0, $self->loc("Only tickets can be merged"));
     }
 
     # Make sure the current user can modify the new ticket.
@@ -3114,24 +3228,7 @@ sub CurrentUserCanSeeTime {
            !RT->Config->Get('HideTimeFieldsFromUnprivilegedUsers');
 }
 
-1;
-
-=head1 AUTHOR
-
-Jesse Vincent, jesse@bestpractical.com
-
-=head1 SEE ALSO
-
-RT
-
-=cut
-
 sub Table {'Tickets'}
-
-
-
-
-
 
 =head2 id
 

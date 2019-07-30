@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -3029,10 +3029,11 @@ sub _parser {
 
     require RT::Interface::Web::QueryBuilder::Tree;
     my $tree = RT::Interface::Web::QueryBuilder::Tree->new;
-    $tree->ParseSQL(
+    my @results = $tree->ParseSQL(
         Query => $string,
         CurrentUser => $self->CurrentUser,
     );
+    die join "; ", map { ref $_ eq 'ARRAY' ? $_->[ 0 ] : $_ } @results if @results;
 
     state ( $active_status_node, $inactive_status_node );
 
@@ -3058,6 +3059,7 @@ sub _parser {
                     my %lifecycle =
                       map { $_ => $RT::Lifecycle::LIFECYCLES{ $_ }{ inactive } }
                       grep { @{ $RT::Lifecycle::LIFECYCLES{ $_ }{ inactive } || [] } }
+                      grep { $_ ne '__maps__' && $RT::Lifecycle::LIFECYCLES_CACHE{ $_ }{ type } eq 'ticket' }
                       keys %RT::Lifecycle::LIFECYCLES;
                     return unless %lifecycle;
 
@@ -3098,7 +3100,9 @@ sub _parser {
                       grep {
                              @{ $RT::Lifecycle::LIFECYCLES{ $_ }{ initial } || [] }
                           || @{ $RT::Lifecycle::LIFECYCLES{ $_ }{ active }  || [] }
-                      } keys %RT::Lifecycle::LIFECYCLES;
+                      }
+                      grep { $_ ne '__maps__' && $RT::Lifecycle::LIFECYCLES_CACHE{ $_ }{ type } eq 'ticket' }
+                      keys %RT::Lifecycle::LIFECYCLES;
                     return unless %lifecycle;
 
                     my $sql;

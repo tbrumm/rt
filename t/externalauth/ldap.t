@@ -8,7 +8,7 @@ eval { require RT::Authen::ExternalAuth; require Net::LDAP::Server::Test; 1; } o
 };
 
 
-my $ldap_port = 1024 + int rand(10000) + $$ % 1024;
+my $ldap_port = RT::Test->find_idle_port;
 ok( my $server = Net::LDAP::Server::Test->new( $ldap_port, auto_schema => 1 ),
     "spawned test LDAP server on port $ldap_port" );
 
@@ -23,9 +23,33 @@ my $entry    = {
     uid          => $username,
     objectClass  => 'User',
     userPassword => 'password',
+    employeeType => 'engineer',
+    employeeID   => '234',
 };
 $ldap->add( $base );
 $ldap->add( $dn, attr => [%$entry] );
+
+my $employee_type_cf = RT::CustomField->new( RT->SystemUser );
+ok( $employee_type_cf->Create(
+        Name       => 'Employee Type',
+        LookupType => RT::User->CustomFieldLookupType,
+        Type       => 'Select',
+        MaxValues  => 1,
+    ),
+    'created cf Employee Type'
+);
+ok( $employee_type_cf->AddToObject( RT::User->new( RT->SystemUser ) ), 'applied Employee Type globally' );
+
+my $employee_id_cf = RT::CustomField->new( RT->SystemUser );
+ok( $employee_id_cf->Create(
+        Name       => 'Employee ID',
+        LookupType => RT::User->CustomFieldLookupType,
+        Type       => 'Freeform',
+        MaxValues  => 1,
+    ),
+    'created cf Employee ID'
+);
+ok( $employee_id_cf->AddToObject( RT::User->new( RT->SystemUser ) ), 'applied Employee ID globally' );
 
 RT->Config->Set( ExternalAuthPriority        => ['My_LDAP'] );
 RT->Config->Set( ExternalInfoPriority        => ['My_LDAP'] );
@@ -43,8 +67,19 @@ RT->Config->Set(
             'net_ldap_args'   => [ version => 3 ],
             'attr_match_list' => [ 'Name', 'EmailAddress' ],
             'attr_map'        => {
-                'Name'         => 'uid',
-                'EmailAddress' => 'mail',
+                'Name'                 => 'uid',
+                'EmailAddress'         => 'mail',
+                'FreeformContactInfo'  => [ 'uid', 'mail' ],
+                'CF.Employee Type'     => 'employeeType',
+                'UserCF.Employee Type' => 'employeeType',
+                'UserCF.Employee ID'   => sub {
+                    my %args = @_;
+                    return ( 'employeeType', 'employeeID' ) unless $args{external_entry};
+                    return (
+                        $args{external_entry}->get_value('employeeType') // '',
+                        $args{external_entry}->get_value('employeeID') // '',
+                    );
+                },
             }
         },
     }
@@ -56,14 +91,21 @@ my ( $baseurl, $m ) = RT::Test->started_ok();
 diag "test uri login";
 {
     ok( !$m->login( 'fakeuser', 'password' ), 'not logged in with fake user' );
+    $m->warning_like( qr/FAILED LOGIN for fakeuser/ );
     ok( $m->login( 'testuser', 'password' ), 'logged in' );
 }
 diag "test user creation";
 {
-my $testuser = RT::User->new($RT::SystemUser);
-my ($ok,$msg) = $testuser->Load( 'testuser' );
-ok($ok,$msg);
-is($testuser->EmailAddress,'testuser@invalid.tld');
+    my $testuser = RT::User->new($RT::SystemUser);
+    my ($ok,$msg) = $testuser->Load( 'testuser' );
+    ok($ok,$msg);
+    is($testuser->EmailAddress,'testuser@invalid.tld');
+
+    is( $testuser->FreeformContactInfo, 'testuser testuser@invalid.tld', 'user FreeformContactInfo' );
+    is( $testuser->FirstCustomFieldValue('Employee Type'), 'engineer', 'user Employee Type value' );
+    is( $testuser->FirstCustomFieldValue('Employee ID'),   'engineer 234',      'user Employee ID value' );
+    is( $employee_type_cf->Values->Count,                  1,          'cf Employee Type values count' );
+    is( $employee_type_cf->Values->First->Name,            'engineer', 'cf Employee Type value' );
 }
 
 
@@ -92,10 +134,64 @@ diag "test redirect after login";
     is( $m->uri, $baseurl . '/SelfService/Closed.html' );
 }
 
+diag "test admin user create";
+{
+    $m->logout;
+    ok( $m->login );
+    $m->get_ok( $baseurl . '/Admin/Users/Modify.html?Create=1', 'user create page' );
+
+    my $username = 'testuser2';
+    $m->submit_form(
+        form_name => 'UserCreate',
+        fields    => { Name => $username },
+    );
+    $m->text_contains( 'User could not be created: Could not set user info' );
+    $m->text_lacks( 'User could not be created: Name in use' );
+
+    my $entry = {
+        cn           => $username,
+        mail         => "$username\@invalid.tld",
+        uid          => $username,
+        objectClass  => 'User',
+        userPassword => 'password',
+        employeeType => 'sale',
+        employeeID   => '345',
+    };
+    $ldap->add( $base );
+    my $dn = "uid=$username,$base";
+    $ldap->add( $dn, attr => [ %$entry ] );
+
+    $m->submit_form(
+        form_name => 'UserCreate',
+        fields    => { Name => '', EmailAddress => "$username\@invalid.tld" },
+    );
+    $m->text_contains( 'User created' );
+    my ( $id ) = ( $m->uri =~ /id=(\d+)/ );
+    my $user = RT::User->new( RT->SystemUser );
+    $user->Load( $id );
+    is( $user->EmailAddress, "$username\@invalid.tld", 'email is not changed' );
+    is( $user->Name, $username, 'got canonicalized Name' );
+
+}
+
+diag "test user update via login";
+{
+    $m->logout;
+    ok( $m->login( 'testuser2', 'password' ), 'logged in' );
+
+    my $user = RT::User->new( RT->SystemUser );
+    ok( $user->Load('testuser2'), 'load user testuser2' );
+    is( $user->FreeformContactInfo, 'testuser2 testuser2@invalid.tld', 'user FreeformContactInfo' );
+    is( $user->FirstCustomFieldValue('Employee Type'), 'sale',    'user Employee Type value' );
+    is( $user->FirstCustomFieldValue('Employee ID'),   'sale 345', 'user Employee ID value' );
+    is( $employee_type_cf->Values->Count,              2,         'cf Employee Type values count' );
+    is_deeply(
+        [ map { $_->Name } @{ $employee_type_cf->Values->ItemsArrayRef } ],
+        [ 'engineer', 'sale' ],
+        'cf Employee Type values'
+    );
+}
+
 $ldap->unbind();
-
-$m->get_warnings;
-
-undef $m;
 
 done_testing;

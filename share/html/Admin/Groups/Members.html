@@ -2,7 +2,7 @@
 %#
 %# COPYRIGHT:
 %#
-%# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+%# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 %#                                          <sales@bestpractical.com>
 %#
 %# (Except where explicitly superseded by other copyright notices)
@@ -73,16 +73,16 @@
 <&|/l&>Users</&>
 % my $Users = $Group->UserMembersObj( Recursively => 0 );
 <%perl>
-my @users = sort { lc($a->[0]) cmp lc($b->[0]) }
-            map { [$m->scomp("/Elements/ShowUser", User => $_), $_] }
+my @users = map {$_->[1]}
+            sort { lc($a->[0]) cmp lc($b->[0]) }
+            map { [$_->Format, $_] }
             @{ $Users->ItemsArrayRef };
 </%perl>
 <ul>
-% for (@users) {
-% my ($rendered, $user) = @$_;
+% for my $user (@users) {
 % $UsersSeen{ $user->id } = 1 if $SkipSeenUsers;
 <li><input type="checkbox" class="checkbox" name="DeleteMember-<% $user->PrincipalObj->Id %>" value="1" />
-<a href="<% RT->Config->Get('WebPath') %>/Admin/Users/Modify.html?id=<% $user->id %>"><% $rendered |n%></a></li>
+<& /Elements/ShowUser, User => $user &></li>
 % }
 </ul>
 <&|/l&>Groups</&>
@@ -131,18 +131,33 @@ foreach my $key (keys %ARGS) {
 
 # Process new users
 foreach my $member (grep $_, @AddMembersUsers) {
-    my $principal = RT::User->new($session{'CurrentUser'});
+    my $principal;
+    my $user = RT::User->new($session{'CurrentUser'});
 
     if ($member =~ /^User-(\d+)$/) {
         # Old style, using id
-        $principal->Load($1);
-    } else {
-        # New style, just a username
-        $principal->Load($member);
+        my ($ret, $msg) = $user->Load($1);
+        if ( $ret ){
+            $principal = $user->PrincipalObj;
+        }
+        else {
+            RT::Logger->error("Unable to load user with id $1: $msg");
+        }
+    }
+    else {
+        # Accept username or email address
+        my $msg;
+        ($principal, $msg) = RT->System->CanonicalizePrincipal( User => $member );
+        RT::Logger->error("Unable to load principal: $msg") unless $principal;
     }
 
-    my ($val, $msg) = $Group->AddMember($principal->PrincipalId);
-    push (@results, $msg);
+    if ( $principal and $principal->Id ){
+        my ($val, $msg) = $Group->AddMember($principal->Id);
+        push (@results, $msg);
+    }
+    else {
+        push (@results, "Unable to load user $member");
+    }
 }
 
 # Process new groups

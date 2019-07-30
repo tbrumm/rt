@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -48,13 +48,15 @@
 
 =head1 NAME
 
-  RT::User - RT User object
+RT::User - RT User object
 
 =head1 SYNOPSIS
 
   use RT::User;
 
 =head1 DESCRIPTION
+
+Object to operate on a single RT user record.
 
 =head1 METHODS
 
@@ -84,6 +86,7 @@ use RT::Principals;
 use RT::ACE;
 use RT::Interface::Email;
 use Text::Password::Pronounceable;
+use RT::Util;
 
 sub _OverlayAccessible {
     {
@@ -107,7 +110,13 @@ sub _OverlayAccessible {
 
 =head2 Create { PARAMHASH }
 
+Create accepts all core RT::User fields (Name, EmailAddress, etc.) and
+user custom fields in the form UserCF.Foo where Foo is the name of the
+custom field.
 
+    my ($ret, $msg) = $user->Create( Name => 'mycroft',
+                                     EmailAddress => 'mycroft@example.com',
+                                     UserCF.Relationship => 'Brother' );
 
 =cut
 
@@ -184,7 +193,7 @@ sub Create {
 
     delete $args{'Disabled'};
 
-    $self->SUPER::Create(id => $principal_id , %args);
+    $self->SUPER::Create( id => $principal_id, map { $_ => $args{$_} } grep { !/^(?:User)?CF\./ } keys %args );
     my $id = $self->Id;
 
     #If the create failed.
@@ -194,6 +203,9 @@ sub Create {
 
         return ( 0, $self->loc('Could not create user') );
     }
+
+    # Handle any user CFs
+    $self->UpdateObjectCustomFieldValues( %args );
 
     my $aclstash = RT::Group->new($self->CurrentUser);
     my $stash_id = $aclstash->_CreateACLEquivalenceGroup($principal);
@@ -256,6 +268,44 @@ sub Create {
     return ( $id, $self->loc('User created') );
 }
 
+=head2 UpdateObjectCustomFieldValues
+
+Set User CFs from incoming args in the form UserCF.Foo.
+
+=cut
+
+sub UpdateObjectCustomFieldValues {
+    my $self = shift;
+    my %args   = @_;
+
+    foreach my $rtfield ( sort keys %args ) {
+        next unless $rtfield =~ /^UserCF\.(.+)$/i;
+        my $cf_name = $1;
+        my $value   = $args{$rtfield};
+        $value = '' unless defined $value;
+
+        my $current = $self->FirstCustomFieldValue($cf_name);
+        $current = '' unless defined $current;
+
+        if ( not length $current and not length $value ) {
+            $RT::Logger->debug("\tCF.$cf_name\tskipping, no value provided");
+            next;
+        }
+        elsif ( $current eq $value ) {
+            $RT::Logger->debug("\tCF.$cf_name\tunchanged => $value");
+            next;
+        }
+
+        $current = 'unset' unless length $current;
+        $RT::Logger->debug("\tCF.$cf_name\t$current => $value");
+
+        my ( $ok, $msg ) = $self->AddCustomFieldValue( Field => $cf_name, Value => $value );
+        $RT::Logger->error( $self->Name . ": Couldn't add value '$value' for '$cf_name': $msg" )
+          unless $ok;
+    }
+    return;
+}
+
 =head2 ValidateName STRING
 
 Returns either (0, "failure reason") or 1 depending on whether the given
@@ -278,6 +328,109 @@ sub ValidateName {
     else {
         return 1;
     }
+}
+
+=head2 GenerateAnonymousName
+
+Generate a random username proceeded by 'anon_' and then a
+random string, Returns the AnonymousName string.
+
+=cut
+
+sub GenerateAnonymousName {
+    my $self = shift;
+
+    my $name;
+    do {
+        $name = 'anon_' . Digest::MD5::md5_hex( time . {} . rand() );
+    } while !$self->ValidateName($name);
+
+    return $name;
+}
+
+=head2 AnonymizeUser { ClearCustomfields => 1|0 }
+
+Remove all personal identifying information on the user record, but keep
+the user record alive. Additionally replace the username with an
+anonymous name.  Submit ClearCustomfields in a paramhash, if true all
+customfield values applied to the user record will be cleared.
+
+=cut
+
+sub AnonymizeUser {
+    my $self = shift;
+    my %args = (
+        ClearCustomFields => undef,
+        @_,
+    );
+
+    my %skip_clear = map { $_ => 1 } qw/Name Password AuthToken/;
+    my @user_identifying_info
+      = grep { !$skip_clear{$_} && $self->_Accessible( $_, 'write' ) } keys %{ $self->_CoreAccessible() };
+
+    $RT::Handle->BeginTransaction();
+
+    # Remove identifying user information from record
+    foreach my $attr (@user_identifying_info) {
+        if ( defined $self->$attr && length $self->$attr ) {
+            my $method = 'Set' . $attr;
+            my ( $ret, $msg ) = $self->$method('');
+            unless ($ret) {
+                RT::Logger->error( "Could not clear user $attr: " . $msg );
+                $RT::Handle->Rollback();
+                return ( $ret, $self->loc( "Couldn't clear user [_1]", $self->loc($attr) ) );
+            }
+        }
+    }
+
+    # Do not do anything if password is already unset
+    if ( $self->HasPassword ) {
+        my ( $ret, $msg ) = $self->_Set( Field => 'Password', Value => '*NO-PASSWORD*' );
+        unless ($ret) {
+            RT::Logger->error("Could not clear user password: $msg");
+            $RT::Handle->Rollback();
+            return ( $ret, "Could not clear user Password" );
+        }
+    }
+
+    # Generate the random anon username
+    my ( $ret, $msg ) = $self->SetName( $self->GenerateAnonymousName );
+    unless ($ret) {
+        RT::Logger->error( "Could not anonymize user Name: " . $msg );
+        $RT::Handle->Rollback();
+        return ( $ret, $self->loc( "Could not anonymize user [_1]", $self->loc('Name') ) );
+    }
+
+    # Clear AuthToken
+    if ( $self->_Value('AuthToken') ) {
+        my ( $ret, $msg ) = $self->SetAuthToken('');
+        unless ($ret) {
+            RT::Logger->error( "Could not clear user AuthToken: " . $msg );
+            $RT::Handle->Rollback();
+            return ( $ret, $self->loc( "Couldn't clear user [_1]", $self->loc('AuthToken') ) );
+        }
+    }
+
+    # Remove user customfield values
+    if ( $args{'ClearCustomFields'} ) {
+        my $cfs = RT::CustomFields->new( RT->SystemUser );
+        $cfs->LimitToLookupType('RT::User');
+
+        while ( my $cf = $cfs->Next ) {
+            my $ocfvs = $self->CustomFieldValues($cf);
+            while ( my $ocfv = $ocfvs->Next ) {
+                my ( $ret, $msg ) = $ocfv->Delete;
+                unless ($ret) {
+                    RT::Logger->error( "Could not delete ocfv #" . $ocfv->id . ": $msg" );
+                    $RT::Handle->Rollback();
+                    return ( $ret, $self->loc( "Could not clear user custom field [_1]", $cf->Name ) );
+                }
+            }
+        }
+    }
+    $RT::Handle->Commit();
+
+    return ( 1, $self->loc('User successfully anonymized') );
 }
 
 =head2 ValidatePassword STRING
@@ -762,12 +915,8 @@ sub CanonicalizeUserInfoFromExternalAuth {
         foreach my $rt_attr (@{$config->{'attr_match_list'}}) {
             # Jump to the next attr in $args if this one isn't in the attr_match_list
             $RT::Logger->debug( "Attempting to use this canonicalization key:",$rt_attr);
-            unless(defined($args->{$rt_attr})) {
-                $RT::Logger->debug("This attribute (",
-                                    $rt_attr,
-                                    ") is null or incorrectly defined in the attr_map for this service (",
-                                    $service,
-                                    ")");
+            unless( ($args->{$rt_attr} // '') =~ /\S/ ) {
+                $RT::Logger->debug("No value provided for RT user attribute $rt_attr");
                 next;
             }
 
@@ -816,6 +965,9 @@ sub CanonicalizeUserInfoFromExternalAuth {
             $params{'EmailAddress'} = $UserObj->CanonicalizeEmailAddress($params{'EmailAddress'});
         }
         %$args = (%$args, %params);
+    }
+    else {
+        $RT::Logger->debug("No record found in configured external sources");
     }
 
     $RT::Logger->info(  (caller(0))[3],
@@ -1099,11 +1251,17 @@ sub IsPassword {
         # If it's a new-style (>= RT 4.0) password, it starts with a '!'
         my (undef, $method, @rest) = split /!/, $stored;
         if ($method eq "bcrypt") {
-            return 0 unless $self->_GeneratePassword_bcrypt($value, @rest) eq $stored;
+            return 0 unless RT::Util::constant_time_eq(
+                $self->_GeneratePassword_bcrypt($value, @rest),
+                $stored
+            );
             # Upgrade to a larger number of rounds if necessary
             return 1 unless $rest[0] < RT->Config->Get('BcryptCost');
         } elsif ($method eq "sha512") {
-            return 0 unless $self->_GeneratePassword_sha512($value, @rest) eq $stored;
+            return 0 unless RT::Util::constant_time_eq(
+                $self->_GeneratePassword_sha512($value, @rest),
+                $stored
+            );
         } else {
             $RT::Logger->warn("Unknown hash method $method");
             return 0;
@@ -1113,16 +1271,28 @@ sub IsPassword {
         my $hash = MIME::Base64::decode_base64($stored);
         # Decoding yields 30 byes; first 4 are the salt, the rest are substr(SHA256,0,26)
         my $salt = substr($hash, 0, 4, "");
-        return 0 unless substr(Digest::SHA::sha256($salt . Digest::MD5::md5(Encode::encode( "UTF-8", $value))), 0, 26) eq $hash;
+        return 0 unless RT::Util::constant_time_eq(
+            substr(Digest::SHA::sha256($salt . Digest::MD5::md5(Encode::encode( "UTF-8", $value))), 0, 26),
+            $hash, 1
+        );
     } elsif (length $stored == 32) {
         # Hex nonsalted-md5
-        return 0 unless Digest::MD5::md5_hex(Encode::encode( "UTF-8", $value)) eq $stored;
+        return 0 unless RT::Util::constant_time_eq(
+            Digest::MD5::md5_hex(Encode::encode( "UTF-8", $value)),
+            $stored
+        );
     } elsif (length $stored == 22) {
         # Base64 nonsalted-md5
-        return 0 unless Digest::MD5::md5_base64(Encode::encode( "UTF-8", $value)) eq $stored;
+        return 0 unless RT::Util::constant_time_eq(
+            Digest::MD5::md5_base64(Encode::encode( "UTF-8", $value)),
+            $stored
+        );
     } elsif (length $stored == 13) {
         # crypt() output
-        return 0 unless crypt(Encode::encode( "UTF-8", $value), $stored) eq $stored;
+        return 0 unless RT::Util::constant_time_eq(
+            crypt(Encode::encode( "UTF-8", $value), $stored),
+            $stored
+        );
     } else {
         $RT::Logger->warning("Unknown password form");
         return 0;
@@ -1218,19 +1388,20 @@ sub GenerateAuthString {
 
 =head3 ValidateAuthString
 
-Takes auth string and protected string. Returns true is protected string
+Takes auth string and protected string. Returns true if protected string
 has been protected by user's L</AuthToken>. See also L</GenerateAuthString>.
 
 =cut
 
 sub ValidateAuthString {
     my $self = shift;
-    my $auth_string = shift;
+    my $auth_string_to_validate = shift;
     my $protected = shift;
 
     my $str = Encode::encode( "UTF-8", $self->AuthToken . $protected );
+    my $valid_auth_string = substr(Digest::MD5::md5_hex($str),0,16);
 
-    return $auth_string eq substr(Digest::MD5::md5_hex($str),0,16);
+    return RT::Util::constant_time_eq( $auth_string_to_validate, $valid_auth_string );
 }
 
 =head2 SetDisabled

@@ -2,7 +2,7 @@
 %#
 %# COPYRIGHT:
 %#
-%# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+%# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 %#                                          <sales@bestpractical.com>
 %#
 %# (Except where explicitly superseded by other copyright notices)
@@ -138,6 +138,8 @@ foreach my $addr ( keys %txn_addresses) {
   next if ( grep {$addr eq lc $_->address} @people_addresses );
   push @one_time_Ccs,$addr;
 }
+
+@one_time_Ccs = sort @one_time_Ccs;
 
 my $hide_cc_suggestions =  RT->Config->Get('HideOneTimeSuggestions', $session{CurrentUser});
 my $show_label    = $m->interp->apply_escapes( loc("show suggestions"), 'h' );

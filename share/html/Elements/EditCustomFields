@@ -2,7 +2,7 @@
 %#
 %# COPYRIGHT:
 %#
-%# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+%# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 %#                                          <sales@bestpractical.com>
 %#
 %# (Except where explicitly superseded by other copyright notices)
@@ -108,7 +108,8 @@ $CustomFields->{include_set_initial} = 1 if $ForCreation;
 
 $CustomFields->LimitToGrouping( $Object => $Grouping ) if defined $Grouping;
 
-$m->callback( %ARGS, CallbackName => 'MassageCustomFields', CustomFields => $CustomFields );
+$m->callback( %ARGS, CallbackName => 'MassageCustomFields', CustomFields => $CustomFields,
+                  Object => $Object, ShowHintsRef => \$ShowHints, InTableRef => \$InTable );
 
 $CustomFields->GotoFirstItem;
 my @CustomFields;

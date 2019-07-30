@@ -2,7 +2,7 @@
 #
 # COPYRIGHT:
 #
-# This software is Copyright (c) 1996-2017 Best Practical Solutions, LLC
+# This software is Copyright (c) 1996-2019 Best Practical Solutions, LLC
 #                                          <sales@bestpractical.com>
 #
 # (Except where explicitly superseded by other copyright notices)
@@ -2093,6 +2093,7 @@ sub _AddCustomFieldValue {
         unless ( $new_value_id ) {
             return ( 0, $self->loc( "Could not add new custom field value: [_1]", $msg ) );
         }
+
         if ( $args{'RecordTransaction'} ) {
             my ( $tid, $msg ) = $self->_NewTransaction(
                 Type          => 'CustomField',
@@ -2432,6 +2433,8 @@ sub FindDependencies {
         or $self->isa("RT::User")
         or $self->isa("RT::Group")
         or $self->isa("RT::Article")
+        or $self->isa("RT::Asset")
+        or $self->isa("RT::Catalog")
         or $self->isa("RT::Queue") )
     {
         $objs = RT::Transactions->new( $self->CurrentUser );
@@ -2445,6 +2448,7 @@ sub FindDependencies {
          or $self->isa("RT::Ticket")
          or $self->isa("RT::User")
          or $self->isa("RT::Group")
+         or $self->isa("RT::Asset")
          or $self->isa("RT::Queue")
          or $self->isa("RT::Article") )
             and $self->can("CustomFieldValues") )
@@ -2663,6 +2667,13 @@ sub __DependsOn
     $objs->Limit( FIELD => 'ObjectType', VALUE => ref $self );
     $objs->Limit( FIELD => 'ObjectId', VALUE => $self->id );
     push( @$list, $objs );
+
+    if ( $self->isa( 'RT::CustomField' ) ) {
+        $objs = RT::Transactions->new( $self->CurrentUser );
+        $objs->Limit( FIELD => 'Type',  VALUE => 'CustomField' );
+        $objs->Limit( FIELD => 'Field', VALUE => $self->id );
+        push( @$list, $objs );
+    }
 
 # Links
     if ( $self->can('Links') ) {
